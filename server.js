@@ -5,6 +5,11 @@ const { WebSocketServer } = require('ws');
 const app = express();
 app.use(express.static(__dirname + '/public'));
 app.get('/health', (_, res) => res.send('ok'));
+const fs = require('fs');
+app.get('/', (req, res) => {
+  const p1 = __dirname + '/public/index.html', p2 = __dirname + '/index.html';
+  res.sendFile(fs.existsSync(p1) ? p1 : p2);
+});
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
@@ -129,18 +134,32 @@ function broadcast(room) {
   for (const p of room.players.values()) if (p.ws.readyState === 1) p.ws.send(msg);
 }
 
+function sendList(ws) {
+  if (ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ t: 'list', rooms: [...rooms.values()].map(r => ({ name: r.name, n: r.players.size, st: r.st })) }));
+}
+
 wss.on('connection', ws => {
   let me = null, room = null;
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+  sendList(ws);
   ws.on('message', raw => {
     let m; try { m = JSON.parse(raw); } catch { return; }
-    if (m.t === 'join' && !me) {
-      const rn = String(m.room || 'main').slice(0, 20);
+    const err = msg => ws.send(JSON.stringify({ t: 'err', msg }));
+    if (m.t === 'list') return sendList(ws);
+    if ((m.t === 'join' || m.t === 'create') && !me) {
+      const rn = String(m.room || '').trim().slice(0, 20);
+      if (!rn) return err('방 이름을 입력하세요');
+      if (m.t === 'create' && rooms.has(rn)) return err('이미 있는 방 이름이에요');
+      if (m.t === 'join' && !rooms.has(rn)) return err('없는 방이에요 (방이 사라졌을 수 있어요)');
       room = getRoom(rn);
-      if (room.players.size >= 12) return ws.send(JSON.stringify({ t: 'err', msg: '방이 가득 찼어요 (최대 12명)' }));
+      if (room.players.size >= 12) return err('방이 가득 찼어요 (최대 12명)');
       me = { id: nextId++, ws, name: String(m.name || '익명').slice(0, 10), role: 'thief', x: 400, y: 250, ix: 0, iy: 0, jailed: false };
       room.players.set(me.id, me);
       if (!room.host) room.host = me.id;
-      ws.send(JSON.stringify({ t: 'hi', id: me.id, W, H, jail: JAIL, walls: WALLS, R }));
+      ws.joined = true;
+      ws.send(JSON.stringify({ t: 'hi', room: room.name, id: me.id, W, H, jail: JAIL, walls: WALLS, R }));
     } else if (m.t === 'in' && me) {
       me.ix = Math.max(-1, Math.min(1, +m.x || 0));
       me.iy = Math.max(-1, Math.min(1, +m.y || 0));
@@ -160,6 +179,11 @@ wss.on('connection', ws => {
 setInterval(() => {
   for (const room of rooms.values()) { step(room, 1 / TICK); broadcast(room); }
 }, 1000 / TICK);
+
+setInterval(() => { wss.clients.forEach(c => { if (!c.joined) sendList(c); }); }, 2000);
+setInterval(() => {
+  wss.clients.forEach(c => { if (!c.isAlive) return c.terminate(); c.isAlive = false; c.ping(); });
+}, 25000);
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log('경도 서버 실행:', PORT));
